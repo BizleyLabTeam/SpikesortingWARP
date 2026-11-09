@@ -1,0 +1,47 @@
+{
+    "logpath": "D:/PhD/Ephys data analysis/spikesorting_output/logs",
+
+    "datadir":"D:/PhD/Ephys data analysis/Data", 
+
+    "rec_name": "Manuka_RecB",
+    
+    "ferret_name": "Manuka",
+    
+    "Brain_part": "Right_RecB",
+    
+    "Group_name": "Set14",
+
+    "streams": [0], 
+
+    "sorter_list": ["mountainsort4"], 
+
+    "sorter_params":
+    { 
+        "mountainsort4": {
+            "adjacency_radius": 20,
+            "filter": false,
+            "whiten": false,
+            "num_workers": 10
+        },
+        "mountainsort5":
+        {
+            "scheme": "2",
+            "scheme2_detect_channel_radius": 300,
+            "filter": false,
+            "whiten": false
+        }
+    },
+
+    "working_directory":"D:/PhD/Ephys data analysis/spikesorting_output/working_directory",
+
+    "output_folder": "Manuka_RecB_checking1", 
+    
+
+    "job_kwargs":
+    {
+        "n_jobs": 10,
+        "chunk_size": 30000
+    }
+
+
+}

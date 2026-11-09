@@ -13,4 +13,3 @@ __pycache__/
 *.log
 waveforms/
 phy/
-/Stephen_spikesorting_params_concatenated_MCS_BB.json

@@ -15,13 +15,13 @@ If you already have the matching environment, run the activation command. On Win
 
 ## Set up a recording
 
-Copy the example configuration for local use.
+Use `Stephen_spikesorting_params_concatenated_MCS_BB.json` as the worked example. It shows the settings and paths from my run. Copy it to `config.local.json` and edit the paths and recording labels for your machine.
 
 ```powershell
-Copy-Item -LiteralPath config.example.json -Destination config.local.json
+Copy-Item -LiteralPath Stephen_spikesorting_params_concatenated_MCS_BB.json -Destination config.local.json
 ```
 
-Set `datadir` to the folder containing your recording collections and `rec_name` to the collection you want to sort. Each `Block_J*` folder must contain exactly one `.h5` file, which can be in a subfolder. The example expects this layout.
+Set `datadir` to the folder containing your recording collections and `rec_name` to the collection you want to sort. Each `Block_J*` folder must contain exactly one `.h5` file, which can be in a subfolder. The input folders follow this structure.
 
 ```text
 data/
@@ -39,8 +39,6 @@ data/
 | `ferret_name`, `Brain_part`, `Group_name` | Labels used to organize CSV and Phy output. 
 | `output_folder`, `logpath`, `working_directory` | Writable destinations for results, logs, and sorter working files. 
 
-I also put my own JSON file in as an example (Stephen_spikesorting_params_concatenated_MCS_BB)
-
 Relative paths are resolved from the terminal's current folder. Keep the terminal in the repository root, or use absolute paths in the JSON. Use forward slashes for Windows paths in the JSON, for example `"D:/Recordings"`.
 
 
@@ -53,7 +51,7 @@ python Ste_spikesorting_concatenated_MCS_Adjusted_V3.py config.local.json
 
 The script creates the log and working folders as needed. Under the configured output folder, it saves flat-period-cleaned sessions in `scratch/`, the preprocessed sorting input in `recording/`, and the CSV and Phy results in the animal/brain/group folder. MountainSort4 uses a run subfolder under `temp/` by default and cleans up that subfolder when sorting finishes. The session cache stays on disk.
 
-The example's Phy configuration is at `outputs/run_01/Animal_01_Right__Set01/Recording_01/mountainsort4/phy/params.py`. Open it with `phy template-gui` in an environment where Phy is installed.
+The Phy configuration is saved at `<output_folder>/<ferret_name>_<Brain_part>__<Group_name>/<rec_name>/mountainsort4/phy/params.py`. Open it with `phy template-gui` in an environment where Phy is installed.
 
 Use a fresh output location when you want to keep an earlier run's Phy curation. A rerun targeting the same location replaces the waveform and Phy export folders.
 
