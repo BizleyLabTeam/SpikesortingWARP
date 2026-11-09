@@ -1,0 +1,28 @@
+{
+  "logpath": "outputs/run_01/logs",
+  "datadir": "data",
+  "rec_name": "Recording_01",
+  "ferret_name": "Animal_01",
+  "Brain_part": "Right",
+  "Group_name": "Set01",
+  "streams": [
+    0
+  ],
+  "sorter_list": [
+    "mountainsort4"
+  ],
+  "sorter_params": {
+    "mountainsort4": {
+      "adjacency_radius": 20,
+      "filter": false,
+      "whiten": false,
+      "num_workers": 10
+    }
+  },
+  "working_directory": "outputs/run_01/sorter_work",
+  "output_folder": "outputs/run_01",
+  "job_kwargs": {
+    "n_jobs": 10,
+    "chunk_size": 30000
+  }
+}

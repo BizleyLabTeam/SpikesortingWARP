@@ -1,0 +1,16 @@
+/data/
+/outputs/
+/config.local*.json
+__pycache__/
+*.py[cod]
+.venv/
+*.h5
+*.hdf5
+*.nwb
+*.dat
+*.npy
+*.npz
+*.log
+waveforms/
+phy/
+/Stephen_spikesorting_params_concatenated_MCS_BB.json
