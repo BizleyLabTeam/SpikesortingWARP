@@ -698,7 +698,8 @@ def main():
                 map_path = repo_candidate
         chan_map_info = load_warp_channel_map(map_path)
         logger.info(f"Loaded WARP channel map for orientation QC from {map_path}")
-    config_dir = Path(args.params_file).resolve().parent
+    # Preserve current-directory resolution for configured relative paths.
+    config_dir = Path.cwd()
     raw_output = Path(params['output_folder'])
     output_folder = (config_dir / raw_output).resolve() if not raw_output.is_absolute() else raw_output.resolve()
     raw_log = Path(params['logpath'])
