@@ -1047,7 +1047,7 @@ def main():
         sorter_list[0],
         sortings,
         recextract=recording_saved,
-        rec_name=params["rec_name"],
+        rec_name=run_rec_name,
         ferret_name=params["ferret_name"],
         Brain_part=params["Brain_part"],
         Group_name=params["Group_name"],
