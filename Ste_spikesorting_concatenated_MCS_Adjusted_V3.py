@@ -52,7 +52,20 @@ from spikeinterface import append_recordings, concatenate_recordings
 from probeinterface import generate_multi_columns_probe
 
 from spikesorting_scripts.helpers import generate_warp_32ch_probe
-from spikesorting_scripts.preprocessing import remove_disconnection_events
+from spikesorting_scripts.preprocessing import (
+    build_qc_summary_table,
+    evaluate_block_qc,
+    evaluate_orientation_qc,
+    format_qc_summary_markdown,
+    load_warp_channel_map,
+    plot_channel_coherence,
+    plot_orientation_qc,
+    remove_disconnection_events,
+    sample_block_qc_metrics,
+    write_block_qc_csv,
+    write_orientation_qc_csv,
+    write_qc_summary_tables,
+)
 
 
 #  <compute_rec_power> function computes the average power of a recording
@@ -89,7 +102,8 @@ logger = logging.getLogger(__name__)
 
 def remove_static_flat_periods(
     recording, flat_threshold=1e-9, min_flat_duration_s=0.4,
-    padding_samples=20, probe=None, output_dir="preprocessed_recording"
+    padding_samples=20, probe=None, output_dir="preprocessed_recording",
+    channel_permutation=None,
 ):
     if recording is None:
         raise ValueError("Input recording is None")
@@ -101,6 +115,8 @@ def remove_static_flat_periods(
     min_flat_samples = int(min_flat_duration_s * sampling_frequency)
 
     traces = recording.get_traces()
+    if channel_permutation is not None:
+        traces = traces[:, channel_permutation]
     new_traces = traces.astype(np.float32)
     total_flat_segments = 0
 
@@ -479,18 +495,214 @@ def export_all(sortername, sortextract, recextract, rec_name, ferret_name, Brain
     logger.info(f"Processing complete. Phy files saved at: {outDir / 'phy'}")
 
 
+# =====================================================================
+# FLEXIBLE INPUT & RECORDING SIDE MATCHING HELPERS
+# =====================================================================
+
+REC_SIDE_PATTERNS = {
+    "A": re.compile(r"(?i)(?:^|[^a-zA-Z])rec[\s_-]*a(?:[\s_-]*\d+)?(?:$|[^a-zA-Z0-9])"),
+    "B": re.compile(r"(?i)(?:^|[^a-zA-Z])rec[\s_-]*b(?:[\s_-]*\d+)?(?:$|[^a-zA-Z0-9])"),
+}
+
+
+def normalize_rec_side(value):
+    """
+    Normalizes a recording side specification into 'A', 'B', None, or a custom regex string.
+    Accepts values such as:
+      - 'A', 'a', 'RecA', 'Rec_A', 'Rec A', 'Rec-A', 'Rec_A_2', 'Left_RecA' -> 'A'
+      - 'B', 'b', 'RecB', 'Rec_B', 'Rec B', 'Rec-B', 'Rec_B_2', 'Right_RecB' -> 'B'
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.upper() in ("A", "B"):
+        return text.upper()
+
+    match_a = REC_SIDE_PATTERNS["A"].search(text)
+    match_b = REC_SIDE_PATTERNS["B"].search(text)
+    if match_a and not match_b:
+        return "A"
+    if match_b and not match_a:
+        return "B"
+
+    return text
+
+
+def extract_block_number(block_name):
+    """Extracts the block number from names like 'Block_J1-1128' -> 1128."""
+    match = re.search(r"(\d+)$", block_name)
+    if match:
+        return int(match.group(1))
+    digits = re.sub(r"\D", "", block_name)
+    return int(digits) if digits else 0
+
+
+def resolve_datadir(params):
+    """
+    Resolves the directory containing Block_J* folders.
+    Supports both:
+      1. datadir / rec_name (e.g. datadir='Z:/WARPData', rec_name='F2206_Hurricane')
+      2. datadir directly containing Block_J* folders (e.g. datadir='Z:/WARPData/F2206_Hurricane')
+    """
+    base_dir = Path(params["datadir"])
+    rec_name = params.get("rec_name", "")
+    candidate = base_dir / rec_name if rec_name else base_dir
+
+    if candidate.exists() and any(candidate.glob("Block_J*")):
+        return candidate
+    if base_dir.exists() and any(base_dir.glob("Block_J*")):
+        return base_dir
+    return candidate
+
+
+def select_block_h5_file(block_dir: Path, rec_side=None, fallback_side=None):
+    """
+    Selects the single target .h5 file from a block directory.
+    Works for:
+      - Pre-split directories (1 .h5 file per block folder)
+      - Combined directories (both Rec A and Rec B .h5 files in the same block folder,
+        with flexible names like Rec_A.h5, Rec_A_3.h5, Rec_B_2.h5, RecB.h5, etc.)
+    """
+    h5_files = sorted(block_dir.rglob("*.h5"))
+    if not h5_files:
+        logger.error(f"No .h5 files found in {block_dir}")
+        return None
+
+    effective_side = rec_side or fallback_side
+
+    if effective_side in ("A", "B"):
+        target_pattern = REC_SIDE_PATTERNS[effective_side]
+        other_side = "B" if effective_side == "A" else "A"
+        other_pattern = REC_SIDE_PATTERNS[other_side]
+
+        matched = [f for f in h5_files if target_pattern.search(f.stem)]
+        if len(matched) == 1:
+            return matched[0]
+        if len(matched) > 1:
+            logger.error(
+                f"Multiple .h5 files matched Rec {effective_side} in {block_dir}: {[f.name for f in matched]}"
+            )
+            return None
+
+        # If no explicit Rec A/B pattern matched in the filename, allow a single generic .h5
+        # file (e.g. 'recording.h5' in a pre-split folder) as long as it isn't tagged as the opposite side.
+        if len(h5_files) == 1 and not other_pattern.search(h5_files[0].stem):
+            return h5_files[0]
+
+        logger.error(
+            f"Expected 1 .h5 matching Rec {effective_side} in {block_dir}, "
+            f"found 0 among: {[f.name for f in h5_files]}"
+        )
+        return None
+
+    if effective_side is not None:
+        custom_re = re.compile(effective_side, re.IGNORECASE)
+        matched = [f for f in h5_files if custom_re.search(f.stem) or custom_re.search(f.name)]
+        if len(matched) == 1:
+            return matched[0]
+        logger.error(
+            f"Expected 1 .h5 matching '{effective_side}' in {block_dir}, "
+            f"found {len(matched)} among: {[f.name for f in h5_files]}"
+        )
+        return None
+
+    # No side specified or inferred: works when each block folder has only 1 .h5 file
+    if len(h5_files) == 1:
+        return h5_files[0]
+
+    logger.error(
+        f"Expected 1 .h5 in {block_dir}, found {len(h5_files)}: {[f.name for f in h5_files]}. "
+        f"Please set '\"rec_side\": \"A\"' or '\"rec_side\": \"B\"' in your JSON config to sort one side."
+    )
+    return None
+
+
 ############################### MAIN #######################################
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("params_file", help="path to the json file containing the parameters")
+    parser.add_argument(
+        "--rec-side",
+        default=None,
+        help="Optional override for recording side to sort ('A' or 'B', e.g. Rec_A vs Rec_B)",
+    )
+    parser.add_argument(
+        "--block-qc",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable enhanced wireless dropout & noise block QC (overrides JSON block_qc.enabled)",
+    )
+    parser.add_argument(
+        "--orientation-qc",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable headstage orientation QC across blocks (overrides JSON orientation_qc.enabled)",
+    )
+    parser.add_argument(
+        "--orientation-action",
+        choices=["warn", "flip", "exclude"],
+        default=None,
+        help="Action when upside-down headstage is detected ('warn', 'flip', or 'exclude')",
+    )
+    parser.add_argument(
+        "--reference-block",
+        type=str,
+        default=None,
+        help="Reference block name or number for orientation QC (e.g. '906' or 'Block_J1-906')",
+    )
+    parser.add_argument(
+        "--qc-only",
+        action="store_true",
+        help="Run block & orientation QC, export summary tables/plots, and exit before concatenation and sorting",
+    )
     args = parser.parse_args()
 
     with open(args.params_file) as json_file:
         minified = jsmin(json_file.read())
         params = json.loads(minified)
-    output_folder = Path(params['output_folder']).resolve()
-    logpath = Path(params['logpath'])
+
+    block_qc_cfg = dict(params.get("block_qc") or {})
+    if args.block_qc is not None:
+        block_qc_cfg["enabled"] = bool(args.block_qc)
+    elif args.qc_only and "enabled" not in block_qc_cfg:
+        block_qc_cfg["enabled"] = True
+
+    orientation_qc_cfg = dict(params.get("orientation_qc") or {})
+    if args.orientation_qc is not None:
+        orientation_qc_cfg["enabled"] = bool(args.orientation_qc)
+    elif args.qc_only and "enabled" not in orientation_qc_cfg:
+        orientation_qc_cfg["enabled"] = True
+    if args.orientation_action is not None:
+        orientation_qc_cfg["action"] = args.orientation_action
+    if "reference_block" in params and "reference_block" not in orientation_qc_cfg:
+        orientation_qc_cfg["reference_block"] = params["reference_block"]
+    if args.reference_block is not None:
+        orientation_qc_cfg["reference_block"] = args.reference_block
+
+    block_qc_enabled = bool(block_qc_cfg.get("enabled", False))
+    orientation_qc_enabled = bool(orientation_qc_cfg.get("enabled", False))
+
+    chan_map_info = None
+    if orientation_qc_enabled:
+        raw_map_path = orientation_qc_cfg.get(
+            "chan_map_path", "docs/Warp_to_WirelessHeadstage_ChanMap.txt"
+        )
+        map_path = Path(raw_map_path)
+        if not map_path.is_absolute():
+            repo_candidate = Path(__file__).resolve().parent / map_path
+            if repo_candidate.exists():
+                map_path = repo_candidate
+        chan_map_info = load_warp_channel_map(map_path)
+        logger.info(f"Loaded WARP channel map for orientation QC from {map_path}")
+    config_dir = Path(args.params_file).resolve().parent
+    raw_output = Path(params['output_folder'])
+    output_folder = (config_dir / raw_output).resolve() if not raw_output.is_absolute() else raw_output.resolve()
+    raw_log = Path(params['logpath'])
+    logpath = (config_dir / raw_log).resolve() if not raw_log.is_absolute() else raw_log.resolve()
     logpath.mkdir(parents=True, exist_ok=True)
     # Retrieve the working directory from params or use a default
     now = datetime.datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
@@ -509,24 +721,53 @@ def main():
     if 'kilosort3' in sorter_list:
         ss.Kilosort3Sorter.set_kilosort3_path(params['sorter_paths']['kilosort3_path'])
 
-    datadir = Path(params['datadir']) / params[
-        'rec_name']  ## Provide the path of the 'datadir', including the folder that is two level above the final folder containing the .h5 file
-    print(datadir)  ##'rec_name' is the path to the folder before the final folder that contains the .h5 file
+    datadir = resolve_datadir(params)
+    print(f"Data directory: {datadir}")
     streams = params[
         'streams']  ## 'streams' is the path to the stream related to your data recording, containing values (channels * frames) in .h5 groups
 
-    working_directory = Path(params['working_directory']) / params['rec_name']
+    # Determine which side (Rec A or Rec B) to sort, if specified or inferable
+    rec_side = normalize_rec_side(args.rec_side if args.rec_side is not None else params.get("rec_side"))
+    inferred_side = normalize_rec_side(params.get("rec_name")) or normalize_rec_side(params.get("Brain_part"))
+    fallback_side = inferred_side if inferred_side in ("A", "B") else None
+
+    if rec_side:
+        logger.info(f"Target recording side configured: {rec_side}")
+        print(f"Target recording side: Rec {rec_side}" if rec_side in ("A", "B") else f"Target pattern: {rec_side}")
+    elif fallback_side:
+        logger.info(f"Inferred recording side from config labels: Rec {fallback_side}")
+        print(f"Inferred recording side from config labels: Rec {fallback_side}")
+
+    # Build a side-aware run name for working/recording directories so sorting A and B
+    # from the same parent folder never overwrites each other's intermediate files.
+    effective_side_tag = rec_side if rec_side in ("A", "B") else fallback_side
+    run_rec_name = params["rec_name"]
+    if effective_side_tag and not REC_SIDE_PATTERNS[effective_side_tag].search(run_rec_name):
+        run_rec_name = f"{run_rec_name}_Rec{effective_side_tag}"
+
+    raw_work = Path(params['working_directory'])
+    base_work = (config_dir / raw_work).resolve() if not raw_work.is_absolute() else raw_work.resolve()
+    working_directory = base_work / run_rec_name
     working_directory.mkdir(parents=True, exist_ok=True)
 
-    blocks = [bl.name for bl in datadir.glob('Block_J*')]
+    blocks = [bl.name for bl in datadir.glob('Block_J*') if bl.is_dir()]
+    blocks.sort(key=extract_block_number)
+
+    # Optional block_range filter: e.g. "block_range": [1100, 1130] (inclusive)
+    block_range = params.get("block_range")
+    if block_range and len(block_range) == 2:
+        start_b, end_b = int(block_range[0]), int(block_range[1])
+        blocks = [b for b in blocks if start_b <= extract_block_number(b) <= end_b]
+        logger.info(f"Filtered blocks to range [{start_b}, {end_b}]: {len(blocks)} blocks")
+
     print(blocks)
-    blocks.sort(key=lambda f: int(re.sub('\D', '', f)))
     pbar = tqdm(blocks)
 
     recording_list = {stream: [] for stream in streams}
 
     for stream in streams:
         powers = []
+        block_metrics = []
         rec_list = []
         logger.info(f'Loading stream {stream}')
         block_names = {stream: [] for stream in streams}
@@ -537,15 +778,26 @@ def main():
             print(f"Loading block {block}")
 
             try:
-                h5_files = list((datadir / block).rglob("*.h5"))
-                if len(h5_files) != 1:
-                    logger.error(f"Expected 1 .h5 in {datadir / block}, found {len(h5_files)}: {h5_files}")
+                h5_file = select_block_h5_file(
+                    datadir / block,
+                    rec_side=rec_side,
+                    fallback_side=fallback_side,
+                )
+                if h5_file is None:
                     continue
-
-                h5_file = h5_files[0]
+                logger.info(f"Selected .h5 file for {block}: {h5_file.name}")
+                print(f"  Using file: {h5_file.name}")
 
                 # --- load recording ---
                 rec = se.read_mcsh5(str(h5_file), stream_id=stream)
+
+                if rec is not None and rec.get_num_channels() != 32:
+                    logger.warning(
+                        f"Stream {stream} in {h5_file.name} has {rec.get_num_channels()} channels "
+                        f"(channels={rec.get_channel_ids()}). The 32-channel WARP probe expects 32 channels. "
+                        f"Note: In MCS W2100 HDF5 files, stream 0 is often 'Quality Data' (1 channel) and "
+                        f"stream 1 is 'Electrode Raw Data' (32 channels)."
+                    )
 
                 num_frame_save = rec.get_num_frames()
 
@@ -567,7 +819,25 @@ def main():
                 else:
                     print("No recording data found!")
 
-                powers.append(compute_rec_power(rec))
+                if block_qc_enabled or orientation_qc_enabled:
+                    qc_src_cfg = block_qc_cfg if block_qc_enabled else orientation_qc_cfg
+                    m = sample_block_qc_metrics(
+                        rec,
+                        block_name=block,
+                        normal_phy=chan_map_info["normal_phy"] if chan_map_info is not None else None,
+                        num_chunks=int(qc_src_cfg.get("num_chunks", 40)),
+                        chunk_size=int(qc_src_cfg.get("chunk_size", 10000)),
+                        seed=int(qc_src_cfg.get("seed", 0)),
+                        flat_threshold=float(block_qc_cfg.get("flat_threshold", 1e-9)),
+                        chunk_noise_factor=float(block_qc_cfg.get("chunk_noise_factor", 3.0)),
+                        bad_channel_mad_factor=float(block_qc_cfg.get("bad_channel_mad_factor", 3.0)),
+                        min_channel_mad=float(block_qc_cfg.get("min_channel_mad", 1.0)),
+                    )
+                    block_metrics.append(m)
+                    powers.append(m["mean_abs_power"])
+                else:
+                    powers.append(compute_rec_power(rec))
+
                 recording_list[stream].append(rec)
                 block_names[stream].append(block)
 
@@ -575,23 +845,31 @@ def main():
 
                 logger.exception(f"Could not load block {block}")
 
-        #        if powers:
-        #        # only keep recordings with power below 2*median and above 0
-        #            median_power = np.median(powers)
-        #            recording_list[stream] = [recording_list[stream][i] for i, power in enumerate(powers) if 0 < power < 2 * median_power]
-        #        else:
-        #            logger.warning(f"No recordings found for stream {stream}")
-        #
-        bad_blocks = []
+        label_out_dir = output_folder / f"{params['ferret_name']}_{params['Brain_part']}__{params['Group_name']}"
 
         if powers:
-            median_power = np.median(powers)
-            good_indices = [i for i, power in enumerate(powers) if 0 < power < 2 * median_power]
-            bad_indices = [i for i in range(len(powers)) if i not in good_indices]
+            if block_qc_enabled:
+                qc_results = evaluate_block_qc(block_metrics, cfg=block_qc_cfg)
+                qc_csv = write_block_qc_csv(qc_results, label_out_dir)
+                logger.info(f"Saved block QC report to {qc_csv}")
+                keep_mask = [r["keep"] for r in qc_results]
+                for r in qc_results:
+                    msg = (
+                        f"[Block QC] {r['block']}: {'KEEP' if r['keep'] else 'EXCLUDE'} "
+                        f"(flat={r['flat_fraction']:.3f}, noisy_chunks={r['noisy_chunk_fraction']:.3f}, "
+                        f"med_mad={r['median_mad']:.2f}, bad_ch={r['n_bad_channels']}, {r['reasons']})"
+                    )
+                    logger.info(msg) if r["keep"] else logger.warning(msg)
+                    print(msg)
+            else:
+                median_power = np.median(powers)
+                keep_mask = [0 < power < 2 * median_power for power in powers]
+
+            bad_indices = [i for i, keep in enumerate(keep_mask) if not keep]
 
             # Save bad block names
             for i in bad_indices:
-                block_name = block_names[stream][i]  # or however you access it
+                block_name = block_names[stream][i]
                 power_value = powers[i]
                 log_bad_block(
                     block_name=block_name,
@@ -601,6 +879,75 @@ def main():
                     Brain_part=params["Brain_part"],
                     Group_name=params["Group_name"]
                 )
+
+            unflip_map = {}
+            if orientation_qc_enabled and chan_map_info is not None:
+                orient_report = evaluate_orientation_qc(
+                    block_metrics,
+                    keep_mask=keep_mask,
+                    warp_ud=chan_map_info["warp_ud"],
+                    cfg=orientation_qc_cfg,
+                )
+                orient_csv = write_orientation_qc_csv(orient_report["records"], label_out_dir)
+                logger.info(f"Saved headstage orientation QC report to {orient_csv}")
+                if orientation_qc_cfg.get("save_plot", True):
+                    orient_png = plot_orientation_qc(orient_report, label_out_dir)
+                    if orient_png is not None:
+                        logger.info(f"Saved headstage orientation QC plot to {orient_png}")
+                    coherence_png = plot_channel_coherence(orient_report, block_metrics, label_out_dir)
+                    if coherence_png is not None:
+                        logger.info(f"Saved cross-channel coherence QC plot to {coherence_png}")
+
+                for i, r in enumerate(orient_report["records"]):
+                    if r["status"] == "SKIPPED":
+                        continue
+                    msg = (
+                        f"[Orientation QC] {r['block']}: {r['status']} "
+                        f"(score_normal={r['score_normal']:.3f}, score_ud={r['score_ud']:.3f}, "
+                        f"action={r['action_taken']})"
+                    )
+                    if r["status"] in ("UPSIDE_DOWN", "AMBIGUOUS"):
+                        logger.warning(msg)
+                    else:
+                        logger.info(msg)
+                    print(msg)
+                    if r["exclude"]:
+                        keep_mask[i] = False
+                        log_bad_block(
+                            block_name=r["block"],
+                            power_value=powers[i],
+                            output_folder=output_folder,
+                            ferret_name=params["ferret_name"],
+                            Brain_part=params["Brain_part"],
+                            Group_name=params["Group_name"],
+                        )
+                    unflip_map[i] = bool(r["needs_unflip"])
+
+            if block_qc_enabled or orientation_qc_enabled:
+                summary_rows = build_qc_summary_table(
+                    block_qc_results=qc_results if block_qc_enabled else None,
+                    orientation_records=orient_report["records"] if (orientation_qc_enabled and chan_map_info is not None) else None,
+                    block_names=block_names[stream],
+                )
+                tbl_files = write_qc_summary_tables(
+                    summary_rows,
+                    output_dir=label_out_dir,
+                    stream=stream,
+                    title=f"QC Summary: {params['ferret_name']} {params['Brain_part']} {params['Group_name']} (Stream {stream})",
+                )
+                logger.info(f"Saved QC summary table to {tbl_files['csv']} and {tbl_files['md']}")
+                md_table_str = format_qc_summary_markdown(
+                    summary_rows,
+                    title=f"QC Summary: {params['ferret_name']} {params['Brain_part']} {params['Group_name']} (Stream {stream})",
+                )
+                print("\n" + md_table_str + "\n")
+                logger.info("\n" + md_table_str)
+
+            if args.qc_only:
+                logger.info(f"QC-only mode active: completed stream {stream}; skipping session cleaning.")
+                continue
+
+            good_indices = [i for i, keep in enumerate(keep_mask) if keep]
 
             # Process only retained sessions, one at a time. Each result is
             # disk-backed; the concatenation below does not keep their arrays in RAM.
@@ -614,9 +961,15 @@ def main():
             for i in good_indices:
                 block_name = block_names[stream][i]
                 rec = recording_list[stream][i]
+                perm = chan_map_info["unflip_perm"] if unflip_map.get(i, False) else None
+                if perm is not None:
+                    logger.info(f"Applying Warp_UD -> Warp_Chan un-flip permutation to {block_name}")
+                    print(f"  Un-flipping upside-down headstage channels for {block_name}")
                 logger.info(f"Removing static flat periods from {block_name}")
                 cleaned = remove_static_flat_periods(
-                    rec, output_dir=str(session_cache_root / block_name)
+                    rec,
+                    output_dir=str(session_cache_root / block_name),
+                    channel_permutation=perm,
                 )
                 if cleaned.get_num_frames() != rec.get_num_frames():
                     raise RuntimeError(f"Sample count changed while cleaning {block_name}")
@@ -634,16 +987,19 @@ def main():
             logger.info(f"Found {len(recording_list[stream])} recordings for stream {stream}")
             print(f"Found {len(recording_list[stream])} recordings for stream {stream}")
 
+    if args.qc_only:
+        logger.info("QC-only run completed successfully. Exiting before concatenation and sorting.")
+        print("\nQC-only run completed successfully. Exiting before concatenation and sorting.")
+        return
+
     # Concatenate the cleaned, disk-backed sessions in their original order.
     logger.info('Concatenating recordings')
 
     if recording_list[stream]:
-
         recordings = concatenate_recordings(recording_list[stream], sampling_frequency_max_diff=1e-6)
-
     else:
-
         logger.error(f"No recordings to concatenate for stream {stream}")
+        raise RuntimeError(f"No valid recordings were loaded for stream {stream}. Check datadir, rec_side, and block_range.")
 
     # Preprocessing Step
     logger.info('Preprocessing recordings')
@@ -659,7 +1015,7 @@ def main():
     logger.info(recordings)
 
     logger.info(f'start sorting with {sorter_list}')
-    recording_path_stream = output_folder / "recording" / params["rec_name"] / f"stream_{stream}"
+    recording_path_stream = output_folder / "recording" / run_rec_name / f"stream_{stream}"
     Path(recording_path_stream).mkdir(parents=True, exist_ok=True)
     logger.info(f"Saving recording to {recording_path_stream}")
     recording_saved = recordings.save(folder=recording_path_stream, overwrite=True)
