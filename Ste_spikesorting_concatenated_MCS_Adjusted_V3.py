@@ -668,13 +668,13 @@ def main():
     block_qc_cfg = dict(params.get("block_qc") or {})
     if args.block_qc is not None:
         block_qc_cfg["enabled"] = bool(args.block_qc)
-    elif args.qc_only and "enabled" not in block_qc_cfg:
+    elif args.qc_only:
         block_qc_cfg["enabled"] = True
 
     orientation_qc_cfg = dict(params.get("orientation_qc") or {})
     if args.orientation_qc is not None:
         orientation_qc_cfg["enabled"] = bool(args.orientation_qc)
-    elif args.qc_only and "enabled" not in orientation_qc_cfg:
+    elif args.qc_only:
         orientation_qc_cfg["enabled"] = True
     if args.orientation_action is not None:
         orientation_qc_cfg["action"] = args.orientation_action
