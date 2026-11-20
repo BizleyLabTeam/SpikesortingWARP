@@ -1,4 +1,5 @@
-### REC A = Right, REC B = Left
+### Note: Rec A / Rec B may correspond to Left or Right depending on experiment setup.
+### Specify 'rec_side' ('A' or 'B') in the configuration to avoid ambiguity.
 
 
 # This code adjustments are based on Python 3.11.4 and SpikeInterface version 0.101.0 or later.
@@ -20,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import csv
@@ -727,10 +729,61 @@ def main():
     streams = params[
         'streams']  ## 'streams' is the path to the stream related to your data recording, containing values (channels * frames) in .h5 groups
 
+    blocks = [bl.name for bl in datadir.glob('Block_J*') if bl.is_dir()]
+    blocks.sort(key=extract_block_number)
+
+    # Optional block_range filter: e.g. "block_range": [1100, 1130] (inclusive)
+    block_range = params.get("block_range")
+    if block_range and len(block_range) == 2:
+        start_b, end_b = int(block_range[0]), int(block_range[1])
+        blocks = [b for b in blocks if start_b <= extract_block_number(b) <= end_b]
+        logger.info(f"Filtered blocks to range [{start_b}, {end_b}]: {len(blocks)} blocks")
+
     # Determine which side (Rec A or Rec B) to sort, if specified or inferable
     rec_side = normalize_rec_side(args.rec_side if args.rec_side is not None else params.get("rec_side"))
-    inferred_side = normalize_rec_side(params.get("rec_name")) or normalize_rec_side(params.get("Brain_part"))
+    inferred_side = normalize_rec_side(params.get("rec_name"))
+    if inferred_side not in ("A", "B"):
+        inferred_side = normalize_rec_side(params.get("Brain_part"))
     fallback_side = inferred_side if inferred_side in ("A", "B") else None
+
+    # If side is not specified and cannot be inferred from names, check if blocks contain
+    # multiple .h5 files (e.g. combined Rec A and Rec B). Force explicit specification
+    # because Rec A / Rec B do not always map to Left / Right.
+    if rec_side is None and fallback_side is None and blocks:
+        combined_sample = None
+        for b in blocks[:5]:
+            sample_h5s = sorted((datadir / b).rglob("*.h5"))
+            if len(sample_h5s) > 1:
+                combined_sample = (b, sample_h5s)
+                break
+
+        if combined_sample is not None:
+            b_name, sample_h5s = combined_sample
+            prompt_side = None
+            if sys.stdin.isatty():
+                try:
+                    available = [s for s in ("A", "B") if any(REC_SIDE_PATTERNS[s].search(f.stem) for f in sample_h5s)]
+                    options_str = "/".join(available) if available else "A/B"
+                    print(f"\n[Recording Side Required] Multiple recording files found in {b_name}: {[f.name for f in sample_h5s]}")
+                    print("Note: Rec A and Rec B do not always correspond to Left and Right.")
+                    ans = input(f"Which recording side do you want to sort? [{options_str}]: ").strip().upper()
+                    if ans in ("A", "B"):
+                        prompt_side = ans
+                except (EOFError, KeyboardInterrupt):
+                    prompt_side = None
+
+            if prompt_side:
+                rec_side = prompt_side
+                logger.info(f"Selected recording side via interactive prompt: Rec {rec_side}")
+                print(f"Selected recording side: Rec {rec_side}")
+            else:
+                raise ValueError(
+                    f"Multiple recording files found in '{b_name}' ({[f.name for f in sample_h5s]}). "
+                    "Because Rec A and Rec B do not always correspond to Left and Right, you must explicitly specify "
+                    "which recording side to sort.\n"
+                    "Please set '\"rec_side\": \"A\"' or '\"rec_side\": \"B\"' in your JSON config, include 'RecA'/'RecB' "
+                    "in 'rec_name' or 'Brain_part', or pass '--rec-side A' / '--rec-side B' on the command line."
+                )
 
     if rec_side:
         logger.info(f"Target recording side configured: {rec_side}")
@@ -750,16 +803,6 @@ def main():
     base_work = (config_dir / raw_work).resolve() if not raw_work.is_absolute() else raw_work.resolve()
     working_directory = base_work / run_rec_name
     working_directory.mkdir(parents=True, exist_ok=True)
-
-    blocks = [bl.name for bl in datadir.glob('Block_J*') if bl.is_dir()]
-    blocks.sort(key=extract_block_number)
-
-    # Optional block_range filter: e.g. "block_range": [1100, 1130] (inclusive)
-    block_range = params.get("block_range")
-    if block_range and len(block_range) == 2:
-        start_b, end_b = int(block_range[0]), int(block_range[1])
-        blocks = [b for b in blocks if start_b <= extract_block_number(b) <= end_b]
-        logger.info(f"Filtered blocks to range [{start_b}, {end_b}]: {len(blocks)} blocks")
 
     print(blocks)
     pbar = tqdm(blocks)
