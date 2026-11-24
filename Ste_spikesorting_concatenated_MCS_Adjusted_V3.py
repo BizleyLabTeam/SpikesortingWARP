@@ -889,7 +889,10 @@ def main():
 
                 logger.exception(f"Could not load block {block}")
 
-        label_out_dir = output_folder / f"{params['ferret_name']}_{params['Brain_part']}__{params['Group_name']}"
+        label_out_dir = (
+            output_folder / f"{params['ferret_name']}_{params['Brain_part']}__{params['Group_name']}"
+            / run_rec_name / f"stream_{stream}"
+        )
 
         if powers:
             if block_qc_enabled:
