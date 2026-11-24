@@ -1,10 +1,12 @@
 {
   "logpath": "outputs/run_01/logs",
-  "datadir": "data",
-  "rec_name": "Recording_01",
-  "ferret_name": "Animal_01",
-  "Brain_part": "Right",
-  "Group_name": "Set01",
+  "datadir": "Z:/WARPData",
+  "rec_name": "F2206_Hurricane",
+  "rec_side": "B",
+  "block_range": null,
+  "ferret_name": "Hurricane",
+  "Brain_part": "Right_RecB",
+  "Group_name": "Set15",
   "streams": [
     0
   ],
@@ -24,5 +26,32 @@
   "job_kwargs": {
     "n_jobs": 10,
     "chunk_size": 30000
+  },
+  "block_qc": {
+    "enabled": false,
+    "num_chunks": 40,
+    "chunk_size": 10000,
+    "seed": 0,
+    "flat_threshold": 1e-9,
+    "max_flat_fraction": 0.70,
+    "chunk_noise_factor": 3.0,
+    "max_noisy_chunk_fraction": 0.30,
+    "max_power_ratio": 2.0,
+    "min_mad": 1.0,
+    "max_excess_bad_channels": 10,
+    "bad_channel_mad_factor": 3.0
+  },
+  "orientation_qc": {
+    "enabled": false,
+    "chan_map_path": "docs/Warp_to_WirelessHeadstage_ChanMap.txt",
+    "reference_block": null,
+    "action": "warn",
+    "num_chunks": 40,
+    "chunk_size": 10000,
+    "seed": 0,
+    "min_corr": 0.50,
+    "min_margin": 0.10,
+    "exclude_ambiguous": false,
+    "save_plot": true
   }
 }
