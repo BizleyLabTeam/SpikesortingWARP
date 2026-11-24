@@ -708,16 +708,15 @@ def write_qc_summary_tables(
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_content + "\n")
 
-    # If stream is specified, also copy to base name if base name doesn't exist yet
+    # Refresh the base-name summaries with the current stream's results.
     base_csv = output_dir / "qc_summary_table.csv"
     base_md = output_dir / "qc_summary_table.md"
-    if stream is not None and not base_csv.exists():
+    if stream is not None:
         with open(base_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for row in summary_rows:
                 writer.writerow({k: row.get(k, "") for k in fieldnames})
-    if stream is not None and not base_md.exists():
         with open(base_md, "w", encoding="utf-8") as f:
             f.write(md_content + "\n")
 
